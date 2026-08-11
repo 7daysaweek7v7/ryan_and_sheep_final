@@ -450,13 +450,56 @@ function renderTime(){
 }
 function useClear(){
   if(!tools.clear || !tray.length) return;
-  tools.clear--; tray.shift(); playClearSound(); render(); checkEnd();
+  // ===== 关键修复：不能 tray.shift() 直接删牌（会破坏"每种类型数量=3倍数"）=====
+  // 正确做法：把卡槽第一张牌 重新放回棋盘的随机空位，视觉上等同于"移除"，
+  // 但总数不变，3倍数约束不被破坏。
+  var card = tray.shift();
+  if(!card){ render(); return; }
+  // 收集棋盘上现存未移除卡牌的坐标，作为"合法锚点"集合
+  var active = [], i;
+  for(i=0; i<cards.length; i++){
+    if(!cards[i].removed) active.push(cards[i]);
+  }
+  if(active.length === 0){
+    // 棋盘已经空了（极端情况），那就放回棋盘中间的默认位置
+    card.x = Math.round(INNER_W/2 - CONFIG.CARD_SIZE/2);
+    card.y = Math.round(INNER_H/2 - CONFIG.CARD_SIZE/2);
+  }else{
+    // 从现存的合法锚点里随机挑一个，做微小的Q单位偏移（避免完美重叠遮挡出bug）
+    var pick = active[Math.floor(Math.random()*active.length)];
+    var offsets = [
+      {dx:0,           dy:0},
+      {dx:CONFIG.Q,    dy:0},
+      {dx:-CONFIG.Q,   dy:0},
+      {dx:0,           dy:CONFIG.Q},
+      {dx:0,           dy:-CONFIG.Q}
+    ];
+    var off = offsets[Math.floor(Math.random()*offsets.length)];
+    // 夹在棋盘内容区范围内
+    card.x = Math.max(0, Math.min(INNER_W - CONFIG.CARD_SIZE, pick.x + off.dx));
+    card.y = Math.max(0, Math.min(INNER_H - CONFIG.CARD_SIZE, pick.y + off.dy));
+    // 层放到最高，保证玩家能看到它（视觉上"消除"后它是新出现的一张）
+    card.layer = 9999;
+    card.stack = 0;
+  }
+  // 标记为"回到棋盘"：removed=false, 重新挂载DOM（因为choose里会加out类+removed=true，所以要重置）
+  card.removed = false;
+  card.el.classList.remove("out");
+  card.el.style.left = card.x + "px";
+  card.el.style.top = card.y + "px";
+  card.el.style.zIndex = card.layer*20 + card.stack + 1;
+  tools.clear--;
+  playClearSound();
+  render();
+  checkEnd();
 }
 function useStash(){
-  if(!tools.stash || !tray.length || stash.length) return;
+  // 条件：暂存工具可用 && 卡槽有牌 && 暂存区没满（满3张才不让放，不满可以分多次凑）
+  if(!tools.stash || !tray.length || stash.length >= CONFIG.STASH_MAX) return;
   tools.stash--;
-  var n=Math.min(CONFIG.STASH_MAX, tray.length);
-  stash=tray.splice(tray.length-n, n);
+  var avail = CONFIG.STASH_MAX - stash.length;        // 暂存区还能放几张
+  var n = Math.min(avail, tray.length);               // 一次尽可能多塞（但不超过卡槽现存）
+  stash = stash.concat(tray.splice(tray.length-n, n));// 塞到暂存区末尾
   render();
 }
 function useShuffle(){
