@@ -282,7 +282,22 @@ function render(){
   document.querySelector("#quizBtn").disabled=quizUsed;
   document.querySelector("#quizHint").textContent = quizUsed ? "本次生命已经答过题了" : "本次生命可答题一次，答对后三种道具各可用一次";
   renderRanking();
+  adjustMobileScale();
 }
+// ===== 移动端自适应缩放：根据屏幕宽度等比缩放棋盘 =====
+function adjustMobileScale(){
+  var vw=window.innerWidth;
+  if(vw<600){
+    var scale=(vw-16)/560;
+    board.style.transform="scale("+scale+")";
+    board.style.transformOrigin="top center";
+    board.style.marginBottom="-"+(580*(1-scale))+"px";
+  }else{
+    board.style.transform="";
+    board.style.marginBottom="";
+  }
+}
+window.addEventListener("resize", adjustMobileScale);
 function renderPile(target, pile, returnable){
   target.innerHTML="";
   var i, slot, card, el;
