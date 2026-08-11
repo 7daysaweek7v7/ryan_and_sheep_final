@@ -284,20 +284,29 @@ function render(){
   renderRanking();
   adjustMobileScale();
 }
-// ===== 移动端自适应缩放：根据屏幕宽度等比缩放棋盘 =====
+// ===== 移动端自适应缩放：整体外壳等比缩放，保证棋盘+多米诺+消除槽比例一致 =====
 function adjustMobileScale(){
   var vw=window.innerWidth;
-  if(vw<600){
-    var scale=(vw-16)/560;
-    board.style.transform="scale("+scale+")";
-    board.style.transformOrigin="top center";
-    board.style.marginBottom="-"+(580*(1-scale))+"px";
+  var shell=document.querySelector(".game-shell");
+  if(!shell) return;
+  // 和 CSS @media (max-width:600px) 保持一致的触发条件
+  if(vw < 600){
+    // 利用 98% 屏幕宽度做缩放（留一点呼吸感），并限制 scale 最大为 1 不放大
+    var available = vw * 0.98;
+    var scale = available / 560;
+    if(scale > 1) scale = 1;
+    shell.style.setProperty("--scale", String(scale));
+    // 高度补偿：transform-scale 不改变文档流占位高度，用负 margin 吃掉缩放后的空白
+    var realH = shell.offsetHeight;
+    var diff = realH * (1 - scale);
+    shell.style.marginBottom = "-" + Math.round(diff) + "px";
   }else{
-    board.style.transform="";
-    board.style.marginBottom="";
+    shell.style.setProperty("--scale", "1");
+    shell.style.marginBottom = "";
   }
 }
 window.addEventListener("resize", adjustMobileScale);
+adjustMobileScale();
 function renderPile(target, pile, returnable){
   target.innerHTML="";
   var i, slot, card, el;
