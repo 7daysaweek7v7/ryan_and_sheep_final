@@ -145,189 +145,223 @@ function beginLevel(){
     totalPerLayer.push(positions[i].length);
     total += positions[i].length;
   }
-  // ===== 第二关·地狱模式·6条约束严格实现（只改卡牌种类分配，布局完全不动）=====
-  // 规则1: 12种卡牌,每种15张(3倍数)
-  // 规则2: 每组三连强制3个不同layer
-  // 规则3: 初始裸露(真·可点击)区每类型最多1张
-  // 规则4: 同类型不能上下/左右相邻的格子
-  // 规则5: 表层大量互不重复干扰(由规则3自然保证)
-  // 规则6: 校验不达标则整盘重分配
+  // ===== 第二关·只换typeIds(头像种类)，布局全不动 =====
+  // 规则1: 12种×15张=180(3的倍数)
+  // 规则2: 每组三连分属浅/中/深三档(按layer排序三等分，每档60张，每类型每档5张)
+  // 规则3: 初始裸露位每类型≤3张(27裸露位>12类型，max1数学不可能→放宽至max3)
+  // 规则4: 同款禁止同层左右相邻/上下紧贴(8邻域禁同，仅同层非多米诺)
+  // 规则5: 顶层可视互不重复(由规则3保证≤3张/类型，最优分布9类型×2+3类型×3=27)
+  // 算法: 两阶段构造 — Phase1分配27裸露位(max3+邻域)，Phase2填充153非裸露位(配额5+邻域)
   var typeIds;
   if(level.types>=12 && total>100){
     var T=level.types, C=level.copies;
-    // ===== 基础元信息：位置、层、坐标、多米诺、网格行列 =====
-    var posMeta=[], layerPositions, i, j, pm, gid;
+    // ===== 基础元信息 =====
+    var posMeta=[], layerPositions, pm, gid, i, j, tt;
     for(i=0; i<positions.length; i++){
-      layerPositions = positions[i];
+      layerPositions=positions[i];
       for(j=0; j<layerPositions.length; j++){
         pm = layerPositions[j];
         posMeta.push({layer:i, stack:pm.stack||0, x:pm.x, y:pm.y, domino:!!pm.domino});
       }
     }
     var POS_NUM = posMeta.length;
-    var CS = CONFIG.CARD_SIZE, BP = CONFIG.BOARD_PAD+CONFIG.BOARD_BORDER;
+    var CS = CONFIG.CARD_SIZE, BP = CONFIG.BOARD_PAD + CONFIG.BOARD_BORDER;
     var STEP = CONFIG.STEP;
+    // 网格行列(3×3邻格)
     var col=new Array(POS_NUM), row=new Array(POS_NUM);
     for(gid=0; gid<POS_NUM; gid++){
       if(posMeta[gid].domino){ col[gid]=-1; row[gid]=-1; continue; }
       col[gid]=Math.round((posMeta[gid].x-BP)/STEP);
       row[gid]=Math.round((posMeta[gid].y-BP)/STEP);
     }
-    function isNeighbor(a,b){
-      if(posMeta[a].domino || posMeta[b].domino) return false;
-      return (Math.abs(col[a]-col[b])<=1 && Math.abs(row[a]-row[b])<=1);
-    }
-    // ===== isBlockedSim：按位置元信息，返回每个位置初始是否"真·可点击"(100%裸露无任何像素遮挡) =====
-    function computeExposed(){
+    // ===== 三档深度池(规则2): 按layer排序三等分，每档60张 =====
+    var sortedGids=[];
+    for(gid=0; gid<POS_NUM; gid++) sortedGids.push(gid);
+    sortedGids.sort(function(a,b){
+      var la=posMeta[a].layer, lb=posMeta[b].layer;
+      if(la!==lb) return la-lb;
+      return (posMeta[a].stack||0)-(posMeta[b].stack||0);
+    });
+    var THIRD=Math.floor(POS_NUM/3);
+    var DEEP=[], MID=[], SHALLOW=[];
+    for(var sd=0; sd<THIRD; sd++) DEEP.push(sortedGids[sd]);
+    for(sd=THIRD; sd<2*THIRD; sd++) MID.push(sortedGids[sd]);
+    for(sd=2*THIRD; sd<POS_NUM; sd++) SHALLOW.push(sortedGids[sd]);
+    var tierOf=new Array(POS_NUM);
+    for(sd=0; sd<DEEP.length; sd++) tierOf[DEEP[sd]]='d';
+    for(sd=0; sd<MID.length; sd++) tierOf[MID[sd]]='m';
+    for(sd=0; sd<SHALLOW.length; sd++) tierOf[SHALLOW[sd]]='s';
+    // 初始裸露(同isBlocked逻辑)
+    var exposed = (function(){
       var res=new Array(POS_NUM);
       for(var s=0; s<POS_NUM; s++) res[s]=false;
-      var me, r1, k, o, hi, r2, lx, rx, ty, by;
       for(s=0; s<POS_NUM; s++){
-        me=posMeta[s]; r1={left:me.x, top:me.y, right:me.x+CS, bottom:me.y+CS};
+        var me=posMeta[s];
+        var r1={left:me.x, top:me.y, right:me.x+CS, bottom:me.y+CS};
         var blocked=false;
-        for(k=0; k<POS_NUM; k++){
+        for(var k=0; k<POS_NUM; k++){
           if(k===s) continue;
-          o=posMeta[k];
-          hi = o.layer>me.layer || (o.layer===me.layer && o.stack>me.stack);
+          var o=posMeta[k];
+          var hi = o.layer>me.layer || (o.layer===me.layer && o.stack>me.stack);
           if(!hi) continue;
-          r2={left:o.x, top:o.y, right:o.x+CS, bottom:o.y+CS};
-          lx=Math.max(r1.left,r2.left); rx=Math.min(r1.right,r2.right);
-          ty=Math.max(r1.top,r2.top);  by=Math.min(r1.bottom,r2.bottom);
+          var r2={left:o.x, top:o.y, right:o.x+CS, bottom:o.y+CS};
+          var lx=Math.max(r1.left,r2.left), rx=Math.min(r1.right,r2.right);
+          var ty=Math.max(r1.top,r2.top),  by=Math.min(r1.bottom,r2.bottom);
           if(rx>lx && by>ty){ blocked=true; break; }
         }
         if(!blocked) res[s]=true;
       }
       return res;
+    })();
+
+    // 辅助：判断两位置是否8邻域相邻(仅同层非多米诺)
+    function isNeighbor(a,b){
+      if(posMeta[a].domino || posMeta[b].domino) return false;
+      if(posMeta[a].layer!==posMeta[b].layer) return false;
+      return (Math.abs(col[a]-col[b])<=1 && Math.abs(row[a]-row[b])<=1);
     }
-    var exposed = computeExposed();
+    // 预计算每个位置的8邻域(加速邻域检查)
+    var nbrs=new Array(POS_NUM);
+    for(gid=0; gid<POS_NUM; gid++){
+      nbrs[gid]=[];
+      for(var nb=0; nb<POS_NUM; nb++){
+        if(gid!==nb && isNeighbor(gid,nb)) nbrs[gid].push(nb);
+      }
+    }
+    // Fisher-Yates shuffle(均匀分布)
+    function shuf(arr){
+      var a=arr.slice(), n=a.length, si, sj, st;
+      for(si=n-1; si>0; si--){ sj=Math.floor(Math.random()*(si+1)); st=a[si]; a[si]=a[sj]; a[sj]=st; }
+      return a;
+    }
 
-    // ===== 把位置按layer分组，供规则2快速取"三个不同layer"的候选 =====
-    var byLayer = [];
-    for(i=0; i<positions.length; i++) byLayer.push([]);
-    for(gid=0; gid<POS_NUM; gid++) byLayer[posMeta[gid].layer].push(gid);
-    var LAYERS_N = byLayer.length;
+    // 裸露位索引列表
+    var expoList=[];
+    for(var ei0=0; ei0<POS_NUM; ei0++) if(exposed[ei0]) expoList.push(ei0);
 
-    // ===== 核心：重分配循环(MAX_TRIES=60,避免死循环,60次足够) =====
-    var MAX_TRIES = 60, generated=false;
+    // ===== 两阶段构造算法 MAX_TRIES=3000 =====
+    // Phase 1: 分配27裸露位(max3/类型 + 8邻域检查)
+    // Phase 2: 填充153非裸露位(每类型每档5张配额 + 8邻域检查)
+    // 校验: ①裸露≤3/类型 ②每类型每档5张 ③同层8邻域无同款
+    var MAX_TRIES=3000, generated=false;
     for(var tc=0; tc<MAX_TRIES && !generated; tc++){
       typeIds = new Array(POS_NUM);
       for(i=0; i<POS_NUM; i++) typeIds[i]=-1;
-      var occ = new Array(POS_NUM);
-      for(i=0; i<POS_NUM; i++) occ[i]=false;
-
-      function pickFree(poolArr){
-        // 从poolArr里选一个occ=false的随机位置；失败-1
-        var f=[], s;
-        for(s=0; s<poolArr.length; s++) if(!occ[poolArr[s]]) f.push(poolArr[s]);
-        if(f.length===0) return -1;
-        return f[Math.floor(Math.random()*f.length)];
-      }
-      function pickFarNotNeighbor(poolArr, existingArrOfType){
-        // 在 poolArr 中找一个：occ=false 且和 existingArrOfType 中所有位置都isNeighbor=false的位置，
-        // 优先挑选和existingArrOfType中距离最远的那个(规则4/拉开距离)
-        var cand=[], s, t, ok, d, best=-1, bestD=-1;
-        for(s=0; s<poolArr.length; s++){
-          if(occ[poolArr[s]]) continue;
-          ok=true;
-          d=0;
-          for(t=0; t<existingArrOfType.length; t++){
-            if(isNeighbor(poolArr[s], existingArrOfType[t])){ ok=false; break; }
-            if(posMeta[poolArr[s]].domino || posMeta[existingArrOfType[t]].domino){ d+=9999; continue; }
-            d += Math.abs(col[poolArr[s]]-col[existingArrOfType[t]]) + Math.abs(row[poolArr[s]]-row[existingArrOfType[t]]) + Math.abs(posMeta[poolArr[s]].layer-posMeta[existingArrOfType[t]].layer)*3;
-          }
-          if(ok){ cand.push({g:poolArr[s], d:d}); }
-        }
-        if(cand.length===0) return -1;
-        for(s=0; s<cand.length; s++){ if(cand[s].d>bestD){ bestD=cand[s].d; best=cand[s].g; } }
-        return best;
-      }
-
-      // ===== 每种类型: 5组三连组 =====
-      var typeOrder = [];
-      for(var tt=0; tt<T; tt++) typeOrder.push(tt);
-      typeOrder = shuffle(typeOrder);
+      var typeCnt=new Array(T), typeTierCnt=[];
+      for(tt=0; tt<T; tt++){ typeCnt[tt]=0; typeTierCnt.push({d:0,m:0,s:0}); }
+      var typeExpo=new Array(T);
+      for(tt=0; tt<T; tt++) typeExpo[tt]=0;
       var fail=false;
-      for(var ty=0; ty<T; ty++){
-        var thisType = typeOrder[ty];
-        var typePlaced = [];   // 该类型已经放的所有位置索引(全局用,校验跨组邻居)
-        for(var g=0; g<5; g++){
-          // ===== 规则2: 每组三连 → 从3个互不相同的layer中各挑一张 =====
-          // 先随机取5层候选打乱，抽3个不重复的layer编号
-          var layerCand = [];
-          for(var l=0; l<LAYERS_N; l++) if(byLayer[l] && byLayer[l].length>0) layerCand.push(l);
-          layerCand = shuffle(layerCand);
-          if(layerCand.length<3){ fail=true; break; }
-          var L1=layerCand[0], L2=layerCand[1], L3=layerCand[2];
-          // 先从L1放第一张（自由选，不与本类型已有相邻）
-          var p1 = pickFarNotNeighbor(byLayer[L1], typePlaced);
-          if(p1<0) p1 = pickFree(byLayer[L1]);
-          if(p1<0){ fail=true; break; }
-          occ[p1]=true; typeIds[p1]=thisType; typePlaced.push(p1);
-          // 再放L2第二张，不与p1+typePlaced其他相邻
-          var p2 = pickFarNotNeighbor(byLayer[L2], typePlaced);
-          if(p2<0) p2 = pickFree(byLayer[L2]);
-          if(p2<0){ fail=true; break; }
-          occ[p2]=true; typeIds[p2]=thisType; typePlaced.push(p2);
-          // 再放L3第三张，不与p1/p2相邻
-          var p3 = pickFarNotNeighbor(byLayer[L3], typePlaced);
-          if(p3<0) p3 = pickFree(byLayer[L3]);
-          if(p3<0){ fail=true; break; }
-          occ[p3]=true; typeIds[p3]=thisType; typePlaced.push(p3);
+
+      // ===== Phase 1: 分配裸露位(max3/类型 + 邻域) =====
+      var se=shuf(expoList);
+      for(var ei=0; ei<se.length && !fail; ei++){
+        var pos=se[ei];
+        var cands=[];
+        for(tt=0; tt<T; tt++){
+          if(typeExpo[tt]>=3) continue;
+          var ok=true;
+          for(var k2=0; k2<nbrs[pos].length; k2++){
+            if(typeIds[nbrs[pos][k2]]===tt){ ok=false; break; }
+          }
+          if(ok) cands.push(tt);
         }
-        if(fail) break;
+        if(cands.length===0){ fail=true; break; }
+        cands.sort(function(a,b){ return typeExpo[a]-typeExpo[b]; });
+        var mv=typeExpo[cands[0]], mc=[];
+        for(var ci=0; ci<cands.length; ci++){
+          if(typeExpo[cands[ci]]===mv) mc.push(cands[ci]);
+        }
+        var typ=mc[Math.floor(Math.random()*mc.length)];
+        typeIds[pos]=typ; typeCnt[typ]++; typeExpo[typ]++;
+        typeTierCnt[typ][tierOf[pos]]++;
       }
       if(fail) continue;
 
-      // ===== 空位兜底: 没填满的位置补到15张 =====
-      var tcArr=new Array(T);
-      for(tt=0; tt<T; tt++) tcArr[tt]=0;
-      for(i=0; i<POS_NUM; i++) if(typeIds[i]>=0) tcArr[typeIds[i]]++;
-      for(i=0; i<POS_NUM; i++){
-        if(typeIds[i]===-1){
+      // ===== Phase 2: 填充非裸露位(每类型每档5张 + 邻域) =====
+      var tiers2=[DEEP,MID,SHALLOW], tcs2=['d','m','s'];
+      for(var ti=0; ti<3 && !fail; ti++){
+        var pool=tiers2[ti], tc3=tcs2[ti], ua=[];
+        for(var pi=0; pi<pool.length; pi++){
+          if(typeIds[pool[pi]]<0) ua.push(pool[pi]);
+        }
+        ua=shuf(ua);
+        for(var ui=0; ui<ua.length && !fail; ui++){
+          var pos2=ua[ui], c2=[];
+          for(tt=0; tt<T; tt++){
+            if(typeTierCnt[tt][tc3]>=5) continue;
+            var ok2=true;
+            for(var k3=0; k3<nbrs[pos2].length; k3++){
+              if(typeIds[nbrs[pos2][k3]]===tt){ ok2=false; break; }
+            }
+            if(ok2) c2.push(tt);
+          }
+          if(c2.length===0){
+            for(tt=0; tt<T; tt++){
+              if(typeTierCnt[tt][tc3]<5) c2.push(tt);
+            }
+          }
+          if(c2.length===0){ fail=true; break; }
+          c2.sort(function(a,b){ return typeTierCnt[b][tc3]-typeTierCnt[a][tc3]; });
+          var typ2=c2[0];
+          typeIds[pos2]=typ2; typeCnt[typ2]++;
+          typeTierCnt[typ2][tc3]++;
+        }
+      }
+      if(fail) continue;
+
+      // 兜底：剩余空位
+      for(var ri=0; ri<POS_NUM; ri++){
+        if(typeIds[ri]<0){
           var fit=-1;
-          for(tt=0; tt<T; tt++){ if(tcArr[tt]<C){ fit=tt; break; } }
+          for(tt=0; tt<T; tt++){ if(typeCnt[tt]<C){ fit=tt; break; } }
           if(fit<0) fit=Math.floor(Math.random()*T);
-          typeIds[i]=fit; tcArr[fit]++;
+          typeIds[ri]=fit; typeCnt[fit]++;
         }
       }
 
-      // ===== 规则6：严格校验两条 =====
-      // 条件A: 初始裸露(exposed=true)中,每类型最多1张
-      var expoCounts=new Array(T);
-      for(tt=0; tt<T; tt++) expoCounts[tt]=0;
+      // ===== 强制校验 =====
+      // ① 裸露位每类型≤3
+      var eC=new Array(T);
+      for(tt=0; tt<T; tt++) eC[tt]=0;
+      var chk1=true;
       for(i=0; i<POS_NUM; i++){
-        if(exposed[i] && typeIds[i]>=0) expoCounts[typeIds[i]]++;
-      }
-      var anyDouble=false;
-      for(tt=0; tt<T; tt++){ if(expoCounts[tt]>=2){ anyDouble=true; break; } }
-      if(anyDouble) continue;
-
-      // 条件B: 同类型 ≥3张在同一layer → 违规重洗
-      var perLayerCounts=[];
-      for(tt=0; tt<T; tt++){
-        perLayerCounts.push(new Array(LAYERS_N));
-        for(var ll=0; ll<LAYERS_N; ll++) perLayerCounts[tt][ll]=0;
-      }
-      for(i=0; i<POS_NUM; i++){
-        if(typeIds[i]>=0) perLayerCounts[typeIds[i]][posMeta[i].layer]++;
-      }
-      var threeSameLayer=false;
-      for(tt=0; tt<T; tt++){
-        for(ll=0; ll<LAYERS_N; ll++){
-          if(perLayerCounts[tt][ll]>=3){ threeSameLayer=true; break; }
+        if(exposed[i]){
+          eC[typeIds[i]]++;
+          if(eC[typeIds[i]]>3){ chk1=false; break; }
         }
-        if(threeSameLayer) break;
       }
-      if(threeSameLayer) continue;
+      if(!chk1) continue;
+
+      // ② 每类型每档正好5张
+      var chk2=true;
+      for(tt=0; tt<T; tt++){
+        if(typeTierCnt[tt].d!==5 || typeTierCnt[tt].m!==5 || typeTierCnt[tt].s!==5){ chk2=false; break; }
+      }
+      if(!chk2) continue;
+
+      // ③ 同层8邻域无同款
+      var chk3=true;
+      for(var a=0; a<POS_NUM && chk3; a++){
+        if(posMeta[a].domino) continue;
+        for(var k4=0; k4<nbrs[a].length; k4++){
+          var b=nbrs[a][k4];
+          if(b<=a) continue;
+          if(typeIds[a]===typeIds[b]){ chk3=false; break; }
+        }
+      }
+      if(!chk3) continue;
 
       generated=true;
     }
     if(!generated){
-      // 极端兜底: 回退均匀洗牌, 但保证布局不崩溃
-      typeIds = shuffle(Array.from({length:T}, function(_,id){ return Array.from({length:C}, function(){return id;}); }).flat());
+      // 极端兜底
+      var deck=[];
+      for(var zz=0; zz<T; zz++){ for(var zc=0; zc<C; zc++) deck.push(zz); }
+      typeIds = shuf(deck);
     }
   }else{
-    // 第一关：简单 shuffle
+    // 第一关：简单shuffle
     typeIds=shuffle(Array.from({length:level.types}, function(_,id){ return Array.from({length:level.copies}, function(){return id;}); }).flat());
   }
   // ===== 以下生成 cards 流程完全不变 =====
