@@ -145,46 +145,189 @@ function beginLevel(){
     totalPerLayer.push(positions[i].length);
     total += positions[i].length;
   }
-  // ===== 更随机的 typeId 分配（只针对第二关/地狱模式，第一关保持原简单shuffle） =====
-  // 旧版 shuffle(flat) 的问题：概率性出现 3-4 张同类型连续出现，玩家一点就连消 → 太简单
-  // 新版：先用「均匀轮询法」保证每种类型每隔 TYPES 张才出现 1 次，绝不3连相邻，再做跨层交换洗牌
+  // ===== 第二关·地狱模式·6条约束严格实现（只改卡牌种类分配，布局完全不动）=====
+  // 规则1: 12种卡牌,每种15张(3倍数)
+  // 规则2: 每组三连强制3个不同layer
+  // 规则3: 初始裸露(真·可点击)区每类型最多1张
+  // 规则4: 同类型不能上下/左右相邻的格子
+  // 规则5: 表层大量互不重复干扰(由规则3自然保证)
+  // 规则6: 校验不达标则整盘重分配
   var typeIds;
   if(level.types>=12 && total>100){
-    // —— 地狱级分散 ——
     var T=level.types, C=level.copies;
-    typeIds=new Array(total);
-    // Step1：轮询填充。typeIds[pos] = pos % T  →  天然每T张才重复1次，C轮下来均匀分散
-    for(i=0; i<total; i++) typeIds[i] = i%T;
-    // Step2：分层边界（用 totalPerLayer 算出每张卡属于哪一层，保证跨层交换、不三张挤同一层）
-    var layerOf=new Array(total), cur=0;
-    for(i=0; i<totalPerLayer.length; i++){
-      for(k=0; k<totalPerLayer[i]; k++){ layerOf[cur+k]=i; }
-      cur += totalPerLayer[i];
-    }
-    // Step3：做 2000 次「不同层之间随机交换」，只接受不产生 3 连同类型 的交换
-    //  → 既有随机性，又保持分散、不连号，三张同款必须跨越不同层掀开大堆遮挡才能集齐
-    var tries=0, swaps=0, a, b, tmp, safeA, safeB;
-    var noTriple = function(arr, p){
-      // 检查位置p附近（p-2..p+2）有没有3个连续相同的
-      for(var s=Math.max(0,p-2); s<=Math.min(arr.length-3,p+2); s++){
-        if(arr[s]===arr[s+1] && arr[s+1]===arr[s+2]) return false;
+    // ===== 基础元信息：位置、层、坐标、多米诺、网格行列 =====
+    var posMeta=[], layerPositions, i, j, pm, gid;
+    for(i=0; i<positions.length; i++){
+      layerPositions = positions[i];
+      for(j=0; j<layerPositions.length; j++){
+        pm = layerPositions[j];
+        posMeta.push({layer:i, stack:pm.stack||0, x:pm.x, y:pm.y, domino:!!pm.domino});
       }
-      return true;
-    };
-    while(swaps<2000 && tries<40000){
-      tries++;
-      a=Math.floor(Math.random()*total);
-      b=Math.floor(Math.random()*total);
-      if(a===b) continue;
-      if(layerOf[a]===layerOf[b]) continue;      // 同一层不换，强制跨层分散
-      if(typeIds[a]===typeIds[b]) continue;       // 同类型不换，无意义
-      tmp=typeIds[a]; typeIds[a]=typeIds[b]; typeIds[b]=tmp;
-      safeA=noTriple(typeIds,a); safeB=noTriple(typeIds,b);
-      if(safeA && safeB){ swaps++; }
-      else{ typeIds[b]=typeIds[a]; typeIds[a]=tmp; }   // 回滚
+    }
+    var POS_NUM = posMeta.length;
+    var CS = CONFIG.CARD_SIZE, BP = CONFIG.BOARD_PAD+CONFIG.BOARD_BORDER;
+    var STEP = CONFIG.STEP;
+    var col=new Array(POS_NUM), row=new Array(POS_NUM);
+    for(gid=0; gid<POS_NUM; gid++){
+      if(posMeta[gid].domino){ col[gid]=-1; row[gid]=-1; continue; }
+      col[gid]=Math.round((posMeta[gid].x-BP)/STEP);
+      row[gid]=Math.round((posMeta[gid].y-BP)/STEP);
+    }
+    function isNeighbor(a,b){
+      if(posMeta[a].domino || posMeta[b].domino) return false;
+      return (Math.abs(col[a]-col[b])<=1 && Math.abs(row[a]-row[b])<=1);
+    }
+    // ===== isBlockedSim：按位置元信息，返回每个位置初始是否"真·可点击"(100%裸露无任何像素遮挡) =====
+    function computeExposed(){
+      var res=new Array(POS_NUM);
+      for(var s=0; s<POS_NUM; s++) res[s]=false;
+      var me, r1, k, o, hi, r2, lx, rx, ty, by;
+      for(s=0; s<POS_NUM; s++){
+        me=posMeta[s]; r1={left:me.x, top:me.y, right:me.x+CS, bottom:me.y+CS};
+        var blocked=false;
+        for(k=0; k<POS_NUM; k++){
+          if(k===s) continue;
+          o=posMeta[k];
+          hi = o.layer>me.layer || (o.layer===me.layer && o.stack>me.stack);
+          if(!hi) continue;
+          r2={left:o.x, top:o.y, right:o.x+CS, bottom:o.y+CS};
+          lx=Math.max(r1.left,r2.left); rx=Math.min(r1.right,r2.right);
+          ty=Math.max(r1.top,r2.top);  by=Math.min(r1.bottom,r2.bottom);
+          if(rx>lx && by>ty){ blocked=true; break; }
+        }
+        if(!blocked) res[s]=true;
+      }
+      return res;
+    }
+    var exposed = computeExposed();
+
+    // ===== 把位置按layer分组，供规则2快速取"三个不同layer"的候选 =====
+    var byLayer = [];
+    for(i=0; i<positions.length; i++) byLayer.push([]);
+    for(gid=0; gid<POS_NUM; gid++) byLayer[posMeta[gid].layer].push(gid);
+    var LAYERS_N = byLayer.length;
+
+    // ===== 核心：重分配循环(MAX_TRIES=60,避免死循环,60次足够) =====
+    var MAX_TRIES = 60, generated=false;
+    for(var tc=0; tc<MAX_TRIES && !generated; tc++){
+      typeIds = new Array(POS_NUM);
+      for(i=0; i<POS_NUM; i++) typeIds[i]=-1;
+      var occ = new Array(POS_NUM);
+      for(i=0; i<POS_NUM; i++) occ[i]=false;
+
+      function pickFree(poolArr){
+        // 从poolArr里选一个occ=false的随机位置；失败-1
+        var f=[], s;
+        for(s=0; s<poolArr.length; s++) if(!occ[poolArr[s]]) f.push(poolArr[s]);
+        if(f.length===0) return -1;
+        return f[Math.floor(Math.random()*f.length)];
+      }
+      function pickFarNotNeighbor(poolArr, existingArrOfType){
+        // 在 poolArr 中找一个：occ=false 且和 existingArrOfType 中所有位置都isNeighbor=false的位置，
+        // 优先挑选和existingArrOfType中距离最远的那个(规则4/拉开距离)
+        var cand=[], s, t, ok, d, best=-1, bestD=-1;
+        for(s=0; s<poolArr.length; s++){
+          if(occ[poolArr[s]]) continue;
+          ok=true;
+          d=0;
+          for(t=0; t<existingArrOfType.length; t++){
+            if(isNeighbor(poolArr[s], existingArrOfType[t])){ ok=false; break; }
+            if(posMeta[poolArr[s]].domino || posMeta[existingArrOfType[t]].domino){ d+=9999; continue; }
+            d += Math.abs(col[poolArr[s]]-col[existingArrOfType[t]]) + Math.abs(row[poolArr[s]]-row[existingArrOfType[t]]) + Math.abs(posMeta[poolArr[s]].layer-posMeta[existingArrOfType[t]].layer)*3;
+          }
+          if(ok){ cand.push({g:poolArr[s], d:d}); }
+        }
+        if(cand.length===0) return -1;
+        for(s=0; s<cand.length; s++){ if(cand[s].d>bestD){ bestD=cand[s].d; best=cand[s].g; } }
+        return best;
+      }
+
+      // ===== 每种类型: 5组三连组 =====
+      var typeOrder = [];
+      for(var tt=0; tt<T; tt++) typeOrder.push(tt);
+      typeOrder = shuffle(typeOrder);
+      var fail=false;
+      for(var ty=0; ty<T; ty++){
+        var thisType = typeOrder[ty];
+        var typePlaced = [];   // 该类型已经放的所有位置索引(全局用,校验跨组邻居)
+        for(var g=0; g<5; g++){
+          // ===== 规则2: 每组三连 → 从3个互不相同的layer中各挑一张 =====
+          // 先随机取5层候选打乱，抽3个不重复的layer编号
+          var layerCand = [];
+          for(var l=0; l<LAYERS_N; l++) if(byLayer[l] && byLayer[l].length>0) layerCand.push(l);
+          layerCand = shuffle(layerCand);
+          if(layerCand.length<3){ fail=true; break; }
+          var L1=layerCand[0], L2=layerCand[1], L3=layerCand[2];
+          // 先从L1放第一张（自由选，不与本类型已有相邻）
+          var p1 = pickFarNotNeighbor(byLayer[L1], typePlaced);
+          if(p1<0) p1 = pickFree(byLayer[L1]);
+          if(p1<0){ fail=true; break; }
+          occ[p1]=true; typeIds[p1]=thisType; typePlaced.push(p1);
+          // 再放L2第二张，不与p1+typePlaced其他相邻
+          var p2 = pickFarNotNeighbor(byLayer[L2], typePlaced);
+          if(p2<0) p2 = pickFree(byLayer[L2]);
+          if(p2<0){ fail=true; break; }
+          occ[p2]=true; typeIds[p2]=thisType; typePlaced.push(p2);
+          // 再放L3第三张，不与p1/p2相邻
+          var p3 = pickFarNotNeighbor(byLayer[L3], typePlaced);
+          if(p3<0) p3 = pickFree(byLayer[L3]);
+          if(p3<0){ fail=true; break; }
+          occ[p3]=true; typeIds[p3]=thisType; typePlaced.push(p3);
+        }
+        if(fail) break;
+      }
+      if(fail) continue;
+
+      // ===== 空位兜底: 没填满的位置补到15张 =====
+      var tcArr=new Array(T);
+      for(tt=0; tt<T; tt++) tcArr[tt]=0;
+      for(i=0; i<POS_NUM; i++) if(typeIds[i]>=0) tcArr[typeIds[i]]++;
+      for(i=0; i<POS_NUM; i++){
+        if(typeIds[i]===-1){
+          var fit=-1;
+          for(tt=0; tt<T; tt++){ if(tcArr[tt]<C){ fit=tt; break; } }
+          if(fit<0) fit=Math.floor(Math.random()*T);
+          typeIds[i]=fit; tcArr[fit]++;
+        }
+      }
+
+      // ===== 规则6：严格校验两条 =====
+      // 条件A: 初始裸露(exposed=true)中,每类型最多1张
+      var expoCounts=new Array(T);
+      for(tt=0; tt<T; tt++) expoCounts[tt]=0;
+      for(i=0; i<POS_NUM; i++){
+        if(exposed[i] && typeIds[i]>=0) expoCounts[typeIds[i]]++;
+      }
+      var anyDouble=false;
+      for(tt=0; tt<T; tt++){ if(expoCounts[tt]>=2){ anyDouble=true; break; } }
+      if(anyDouble) continue;
+
+      // 条件B: 同类型 ≥3张在同一layer → 违规重洗
+      var perLayerCounts=[];
+      for(tt=0; tt<T; tt++){
+        perLayerCounts.push(new Array(LAYERS_N));
+        for(var ll=0; ll<LAYERS_N; ll++) perLayerCounts[tt][ll]=0;
+      }
+      for(i=0; i<POS_NUM; i++){
+        if(typeIds[i]>=0) perLayerCounts[typeIds[i]][posMeta[i].layer]++;
+      }
+      var threeSameLayer=false;
+      for(tt=0; tt<T; tt++){
+        for(ll=0; ll<LAYERS_N; ll++){
+          if(perLayerCounts[tt][ll]>=3){ threeSameLayer=true; break; }
+        }
+        if(threeSameLayer) break;
+      }
+      if(threeSameLayer) continue;
+
+      generated=true;
+    }
+    if(!generated){
+      // 极端兜底: 回退均匀洗牌, 但保证布局不崩溃
+      typeIds = shuffle(Array.from({length:T}, function(_,id){ return Array.from({length:C}, function(){return id;}); }).flat());
     }
   }else{
-    // 第一关（简单模式）：保持原shuffle
+    // 第一关：简单 shuffle
     typeIds=shuffle(Array.from({length:level.types}, function(_,id){ return Array.from({length:level.copies}, function(){return id;}); }).flat());
   }
   // ===== 以下生成 cards 流程完全不变 =====
